@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8" />
+    <title>Horror VR - Las</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: black; }
+    </style>
+</head>
+<body>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js';
+import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/webxr/VRButton.js';
+
+// --- INICJALIZACJA ---
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000000, 1, 20);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+// Grupa gracza (do poruszania się w VR)
+const playerGroup = new THREE.Group();
+scene.add(playerGroup);
+playerGroup.add(camera);
+
+// --- OTOCZENIE ---
+const textureLoader = new THREE.TextureLoader();
+const groundTex = textureLoader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg');
+groundTex.wrapS = groundTex.wrapT = THREE.RepeatWrapping;
+groundTex.repeat.set(50, 50);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), new THREE.MeshStandardMaterial({ map: groundTex }));
+ground.rotation.x = -Math.PI/2;
+scene.add(ground);
+
+// Drzewa
+const treePositions = [];
+function createTree(x, z) {
+    const tree = new THREE.Group();
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.25, 3), new THREE.MeshStandardMaterial({ color: 0x2d1b0f }));
+    trunk.position.y = 1.5;
+    const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.5, 5, 8), new THREE.MeshStandardMaterial({ color: 0x051a05 }));
+    leaves.position.y = 4.5;
+    tree.add(trunk, leaves);
+    tree.position.set(x, 0, z);
+    scene.add(tree);
+    treePositions.push({ x: x, z: z });
+}
+for(let i=0; i<100; i++) {
+    const rx = Math.random()*160-80;
+    const rz = Math.random()*160-80;
+    if(Math.abs(rx) > 5 || Math.abs(rz) > 5) createTree(rx, rz);
+}
+
+// --- BROŃ I LATARKA (PRAWY KONTROLER) ---
+const gunGroup = new THREE.Group();
+const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.3), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+barrel.position.z = -0.15;
+gunGroup.add(barrel);
+
+// Licznik amunicji na broni (Canvas Texture)
+const canvas = document.createElement('canvas');
+canvas.width = 64; canvas.height = 64;
+const ctx = canvas.getContext('2d');
+const ammoTexture = new THREE.CanvasTexture(canvas);
+const ammoDisplay = new THREE.Mesh(new THREE.PlaneGeometry(0.05, 0.05), new THREE.MeshBasicMaterial({ map: ammoTexture, transparent: true }));
+ammoDisplay.position.set(0, 0.03, -0.05);
+ammoDisplay.rotation.x = -Math.PI/4;
+gunGroup.add(ammoDisplay);
+
+const flashlight = new THREE.SpotLight(0xffffff, 5, 25, Math.PI/8, 0.4);
+gunGroup.add(flashlight);
+flashlight.target.position.set(0, 0, -1);
+gunGroup.add(flashlight.target);
+
+// Kontrolery
+const controllerRight = renderer.xr.getController(1);
+controllerRight.add(gunGroup);
+playerGroup.add(controllerRight);
+
+const controllerLeft = renderer.xr.getController(0);
+playerGroup.add(controllerLeft);
+
+// --- POTWÓR ---
+const monster = new THREE.Group();
+const mBody = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.2, 2, 8), new THREE.MeshStandardMaterial({ color: 0x000000 }));
+const mHead = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0xff0000, emissiveIntensity: 5 }));
+mHead.position.y = 2.2;
+monster.add(mBody, mHead);
+monster.position.set(0, 0, -30);
+monster.visible = false;
+scene.add(monster);
+
+// --- LOGIKA GRY ---
+let ammo = 6;
+const bullets = [];
+const particles = [];
+
+function updateAmmoUI() {
+    ctx.clearRect(0,0,64,64);
+    ctx.fillStyle = "red";
+    ctx.font = "bold 40px Courier New";
+    ctx.fillText(ammo, 20, 45);
+    ammoTexture.needsUpdate = true;
+}
+updateAmmoUI();
+
+function createImpact(pos, color) {
+    for(let i=0; i<5; i++) {
+        const p = new THREE.Mesh(new THREE.SphereGeometry(0.02), new THREE.MeshBasicMaterial({ color: color }));
+        p.position.copy(pos);
+        p.userData.vel = new THREE.Vector3((Math.random()-0.5)*0.1, Math.random()*0.1, (Math.random()-0.5)*0.1);
+        p.userData.life = 1.0;
+        scene.add(p);
+        particles.push(p);
+    }
+}
+
+function shoot() {
+    if(ammo <= 0) { ammo = 6; updateAmmoUI(); return; }
+    ammo--;
+    updateAmmoUI();
+
+    const bullet = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.01, 0.2), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+    const worldPos = new THREE.Vector3();
+    barrel.getWorldPosition(worldPos);
+    bullet.position.copy(worldPos);
+    
+    const worldQuat = new THREE.Quaternion();
+    controllerRight.getWorldQuaternion(worldQuat);
+    bullet.quaternion.copy(worldQuat);
+    
+    bullet.userData.vel = new THREE.Vector3(0, 0, -1.5).applyQuaternion(worldQuat);
+    bullet.userData.dist = 0;
+    scene.add(bullet);
+    bullets.push(bullet);
+}
+
+controllerRight.addEventListener('selectstart', shoot);
+
+// --- PĘTLA RENDEROWANIA ---
+renderer.setAnimationLoop(() => {
+    const session = renderer.xr.getSession();
+    
+    // 1. Ruch (Lewa Gałka)
+    if (session && session.inputSources) {
+        for (const source of session.inputSources) {
+            if (source.gamepad && source.handedness === 'left') {
+                const axes = source.gamepad.axes; // [x, y, z, w] - zwykle 2 i 3 to gałka
+                const dx = axes[2] || 0;
+                const dz = axes[3] || 0;
+                
+                // Kierunek patrzenia kamery (aby iść tam gdzie patrzymy)
+                const direction = new THREE.Vector3(dx, 0, dz);
+                direction.applyQuaternion(camera.quaternion);
+                direction.y = 0; // blokada latania
+                playerGroup.position.add(direction.multiplyScalar(0.08));
+            }
+        }
+    }
+
+    // 2. Potwór AI
+    if(!monster.visible && Math.random() < 0.001) monster.visible = true;
+    if(monster.visible) {
+        monster.lookAt(playerGroup.position.x, 0, playerGroup.position.z);
+        const mDir = new THREE.Vector3().subVectors(playerGroup.position, monster.position).normalize();
+        monster.position.add(mDir.multiplyScalar(0.05));
+        
+        if(monster.position.distanceTo(playerGroup.position) < 1.5) {
+            // Restart VR (w goglach po prostu resetujemy pozycję)
+            playerGroup.position.set(0, 0, 0);
+            monster.position.set(0, 0, -30);
+            monster.visible = false;
+        }
+    }
+
+    // 3. Pociski
+    for(let i=bullets.length-1; i>=0; i--) {
+        const b = bullets[i];
+        b.position.add(b.userData.vel);
+        b.userData.dist += b.userData.vel.length();
+
+        let hit = false;
+        if(monster.visible && b.position.distanceTo(monster.position.clone().add(new THREE.Vector3(0,1.5,0))) < 1.0) {
+            createImpact(b.position, 0xff0000);
+            monster.visible = false;
+            monster.position.set(Math.random()*40-20, 0, Math.random()*40-20);
+            hit = true;
+        }
+        if(hit || b.userData.dist > 50) { scene.remove(b); bullets.splice(i, 1); }
+    }
+
+    // 4. Cząsteczki
+    for(let i=particles.length-1; i>=0; i--) {
+        const p = particles[i];
+        p.position.add(p.userData.vel);
+        p.userData.life -= 0.05;
+        p.scale.setScalar(p.userData.life);
+        if(p.userData.life <= 0) { scene.remove(p); particles.splice(i, 1); }
+    }
+
+    renderer.render(scene, camera);
+});
+
+// Resizing
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+</body>
+</html>
